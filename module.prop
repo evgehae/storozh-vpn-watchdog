@@ -1,0 +1,6 @@
+id=warp_watchdog
+name=Сторож VPN
+version=v1.6.14
+versionCode=174
+author=Claude
+description=WARP Watchdog v1.6.6: ранний boot-старт, умная проверка warp=on/off, Always-on + плитка как резерв. Action снова умеет переключать управляемый VPN (долгое нажатие на паузе = запомнить новый).
