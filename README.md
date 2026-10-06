@@ -6,7 +6,7 @@ Magisk-модуль для Android: следит за Cloudflare WARP (прил�
 
 # Сторож VPN (WARP Watchdog) — гайд по работе и функционалу
 
-Версия: **v1.6.10**. [Журнал изменений по всем версиям](https://claude.ai/artifact/9kgkdrqY3bSzc1JWioV75c). Magisk-модуль для Xiaomi 12 Pro (Android 15, root), следит за Cloudflare WARP (приложение 1.1.1.1) и чинит его сам, без ручного вмешательства.
+
 
 ## Что модуль делает в двух словах
 
