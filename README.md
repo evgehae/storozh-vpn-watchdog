@@ -2,7 +2,7 @@
 
 Magisk-модуль для Android (root): следит за Cloudflare WARP (приложение 1.1.1.1) и автоматически чинит зависания туннеля, без ручного вмешательства.
 
-![Скриншот 1](https://raw.githubusercontent.com/evgehae/storozh-vpn-watchdog/main/IMG_20261007_224833.jpq)
+![Скриншот 1](https://raw.githubusercontent.com/evgehae/storozh-vpn-watchdog/main/IMG_20261007_224833.jpg)
 
 
 
