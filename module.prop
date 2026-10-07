@@ -2,5 +2,5 @@ id=warp_watchdog
 name=Сторож VPN
 version=v3
 versionCode=3
-author=Claude
+author=EvgehaE
 description=WARP Watchdog v3: лестница восстановления с точным различением причин сбоя (DNS/туннель/WARP не проксирует), Always-on как основной путь, плитка как резерв, защита фонового процесса от простоя и зависаний dumpsys, диагностика по требованию.
