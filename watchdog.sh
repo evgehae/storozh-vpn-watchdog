@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # Сторож VPN (версия читается динамически из module.prop)
 
-# v1.6.4: ранний старт после boot — не ждём Launcher/SystemUI для тихого восстановления.
+# Ранний старт после boot — не ждём Launcher/SystemUI для тихого восстановления.
 EARLY_BOOT_WINDOW=180
 EARLY_INTERVAL=3
 EARLY_BOOT_LOGGED=0
@@ -56,7 +56,7 @@ WIFI_ID=""; LAST_WIFI_ID=""; PEND_SIG=""; PEND_WIFI=""; PEND_SINCE=0; REBIND_AT=
 VPN_RESTART_TIMES=""  # временные метки последних force-stop/плитка через пробел, для лимита MAX_VPN_RESTARTS
 PHYS_FAILN=0           # подряд неудачных phys() — сбрасываем DOWNN только после 2 подряд, ping у операторов ненадёжен
 FB_SINCE=0; FORCE=0; LAST_DIAG_TS=0
-FLICK=0; RECOV_TOTAL=0; RECOV_OK=0; SUMMARY_TS=$(date +%s); HEARTBEAT_TS=$SUMMARY_TS
+FLICK=0; RECOV_TOTAL=0; RECOV_OK=0; SUMMARY_TS=$(date +%s); HEARTBEAT_TS=$SUMMARY_TS; ALWAYSON_TS=$SUMMARY_TS
 FOREIGN_LOGGED=""
 
 log() {
@@ -271,6 +271,8 @@ write_diag() {
     # затяжных/повторяющихся сбоев, когда одной строки недостаточно.
     echo "Сетевые агенты (полностью):"
     timeout 5 dumpsys connectivity 2>/dev/null | grep -F 'NetworkAgentInfo{' | cut -c1-400
+    echo "Последние события перед сбоем:"
+    tail -n 15 "$LOG" 2>/dev/null
   } >> "$DIAG" 2>&1
   if [ $(( $(wc -c < "$DIAG" 2>/dev/null) + 0 )) -gt 60000 ]; then
     tail -n 300 "$DIAG" > "$DIAG.t" && mv "$DIAG.t" "$DIAG"
@@ -297,6 +299,7 @@ vpn_enable() {  # $1 пакет: сначала тихое ожидание (Alw
     wait_for up 60 && return 0
   fi
   log "ОШИБКА: $1 не включился"
+  rm -f "/data/adb/warp_tile_cache_$(echo "$1" | tr -c 'A-Za-z0-9' '_')"
   notify "Сторож VPN" "Не удалось включить $1, включите вручную."
   return 1
 }
@@ -334,6 +337,7 @@ vpn_hard_restart() {  # $1 пакет: force-stop убивает тоннель;
     log "Состояние неоднозначно (не точно 'выключен'), повторное нажатие пропущено ради безопасности"
     wait_for up 30 && return 0
   fi
+  rm -f "/data/adb/warp_tile_cache_$(echo "$1" | tr -c 'A-Za-z0-9' '_')"
   return 1
 }
 
@@ -583,6 +587,13 @@ while true; do
   wl_idle_refresh
 
   refresh_vpn
+  # Раз в ~10 минут, только когда всё и так в порядке — проверяем, не перехватил ли
+  # Always-on VPN кто-то другой (другое приложение, сброс настроек и т.п.), не дожидаясь,
+  # пока это проявится настоящим сбоем.
+  if [ "$V" = up ] && [ "$CURPKG" = "$(managed_pkg)" ] && [ $((N-ALWAYSON_TS)) -ge 600 ]; then
+    ensure_always_on "$(managed_pkg)"
+    ALWAYSON_TS=$N
+  fi
   IFACE_SIG=$(iface_sig)
   if [ "$IFACE_INIT" = 1 ] && { [ "$IFACE_SIG" != "$LAST_IFACE_SIG" ] || [ "$WIFI_ID" != "$LAST_WIFI_ID" ]; }; then
     if [ "$IFACE_SIG" = "$PEND_SIG" ] && [ "$WIFI_ID" = "$PEND_WIFI" ] && [ $((N-PEND_SINCE)) -ge $NET_CONFIRM_SEC ]; then

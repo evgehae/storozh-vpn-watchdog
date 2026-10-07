@@ -1,4 +1,4 @@
-ui_print "- Сторож VPN v1.6.14 (WARP Watchdog)"
+ui_print "- Сторож VPN v3 (WARP Watchdog)"
 rm -f /data/adb/service.d/warp_watchdog.sh /data/adb/service.d/warp_observer.sh
 rm -f /data/adb/service.d/warp_watchdog.sh.off /data/adb/service.d/warp_observer.sh.off
 
@@ -62,9 +62,7 @@ else
   ui_print "  если хотите новые безопасные дефолты (выкл.), поправьте их в конфиге вручную."
 fi
 
-ui_print "- v1.6.5: откат слишком агрессивных таймеров из самодельной 1.6.4 обратно"
-ui_print "  на проверенные значения — та версия слишком часто прерывала"
-ui_print "  восстановление, не дав WARP времени подняться самому."
+ui_print "- Лестница восстановления: от лёгких мер к тяжёлым, с паузами между попытками"
 ui_print "- Отдельно отличает 'WARP выключен' от 'WARP включён, но не проксирует'"
 ui_print "- Перепривязка после смены сети чинит, только если WARP реально сломан"
 ui_print "- Лимит принудительных перезапусков WARP и потолок времени на всю лестницу"
