@@ -57,4 +57,22 @@ Magisk-модуль для Android (root): следит за Cloudflare WARP (п
 - Нажали Action ещё раз — пауза снята, и сторож запоминает **тот VPN, который сейчас подключён**, как управляемый. Если в этот момент ничего не подключено — управляемый не меняется, остаётся прежний.
 - Чтобы вернуться на WARP — та же процедура: пауза → вручную включить WARP → снять паузу.
 
-### Чем W
+### Чем WARP отличается от любого другого VPN в этом модуле
+
+| Возможность | WARP (1.1.1.1) | Любой другой VPN |
+|---|---|---|
+| Проверка «подключён ли VPN» | ✅ | ✅ |
+| Проверка «есть ли вообще интернет» | ✅ | ✅ |
+| Проверка `warp=on/off` | ✅ точная | ❌ недоступна |
+| Перезапуск через плитку / `force-stop` | ✅ | ✅ (если есть плитка) |
+| Always-on VPN | ✅ | ✅ |
+| Лестница восстановления | ✅ полная | ✅ полная, кроме `warp_broken` |
+
+## Диагностика и команды
+
+```sh
+su -c 'sh /data/adb/modules/warp_watchdog/watchdog.sh status'
+su -c 'sh /data/adb/modules/warp_watchdog/watchdog.sh check'
+su -c 'sh /data/adb/modules/warp_watchdog/watchdog.sh diag'
+su -c 'tail -n 60 /data/adb/warp_observer.log'
+su -c 'tail -n 40 /data/adb/warp_diag.log'
