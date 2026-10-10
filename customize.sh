@@ -1,4 +1,4 @@
-ui_print "- Сторож VPN v3 (WARP Watchdog)"
+ui_print "- Сторож VPN v4 (WARP Watchdog)"
 rm -f /data/adb/service.d/warp_watchdog.sh /data/adb/service.d/warp_observer.sh
 rm -f /data/adb/service.d/warp_watchdog.sh.off /data/adb/service.d/warp_observer.sh.off
 

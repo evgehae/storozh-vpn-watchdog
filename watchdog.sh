@@ -18,6 +18,16 @@ AIR_MARK=$DATA/warp_airplane_marker
 TCURL=/data/data/com.termux/files/usr/bin/curl
 LIB=/data/data/com.termux/files/usr/lib
 CF_PKG=com.cloudflare.onedotonedotonedotone
+
+# Телефон ещё не разблокирован первый раз после перезагрузки (FBE/BFU) — данные
+# приложения WARP физически недоступны никому, включая root, пока не введён код
+# разблокировки. Пытаться чинить VPN в этот момент бессмысленно и только впустую
+# тратит попытки и раздувает паузу между ними. Проверяем по доступности собственной
+# папки данных WARP: пуста/недоступна до разблокировки, появляется сразу после неё.
+is_bfu() {
+  [ -z "$(ls -A "/data/user/0/$CF_PKG/files" 2>/dev/null)" ] && \
+  [ -z "$(ls -A "/data/user/0/$CF_PKG/shared_prefs" 2>/dev/null)" ]
+}
 CF_TILE=$CF_PKG/com.cloudflare.app.domain.quicksettingstile.QuickSettingsTileService
 case $0 in */*) MODDIR=${0%/*};; *) MODDIR=.;; esac
 MODPROP=$MODDIR/module.prop
@@ -52,11 +62,11 @@ LAST_LOG_KEY=""; LAST_PROP_KEY=""; LAST_PROP_TS=0; PL=0
 LAST_IFACE_SIG=""; IFACE_INIT=0; NETSW_UNTIL=0
 COOL=300; COOL_UNTIL=0
 LAST_OK_STEP=1; LAST_OK_TS=0; LAST_H3=0; LAST_H4=0
-WIFI_ID=""; LAST_WIFI_ID=""; PEND_SIG=""; PEND_WIFI=""; PEND_SINCE=0; REBIND_AT=0; REBIND_TRIES=0; LAST_REBIND_TS=0
+WIFI_ID=""; LAST_WIFI_ID=""; PEND_SIG=""; PEND_WIFI=""; PEND_SINCE=0; REBIND_AT=0; REBIND_TRIES=0; LAST_REBIND_TS=0; NETSW_TIMES=""
 VPN_RESTART_TIMES=""  # временные метки последних force-stop/плитка через пробел, для лимита MAX_VPN_RESTARTS
 PHYS_FAILN=0           # подряд неудачных phys() — сбрасываем DOWNN только после 2 подряд, ping у операторов ненадёжен
 FB_SINCE=0; FORCE=0; LAST_DIAG_TS=0
-FLICK=0; RECOV_TOTAL=0; RECOV_OK=0; SUMMARY_TS=$(date +%s); HEARTBEAT_TS=$SUMMARY_TS; ALWAYSON_TS=$SUMMARY_TS
+FLICK=0; RECOV_TOTAL=0; RECOV_OK=0; SUMMARY_TS=$(date +%s); HEARTBEAT_TS=$SUMMARY_TS; ALWAYSON_TS=$SUMMARY_TS; BFU_LOGGED=0
 FOREIGN_LOGGED=""
 
 log() {
@@ -75,7 +85,11 @@ if [ -x "$TCURL" ]; then CURL=$TCURL
 elif command -v curl >/dev/null 2>&1; then CURL=curl
 fi
 cu() {
-  if [ "$CURL" = "$TCURL" ]; then LD_LIBRARY_PATH=$LIB "$CURL" "$@"; else "$CURL" "$@"; fi
+  # Внешний timeout поверх собственного -m у curl — вторая линия защиты: если
+  # сетевой стек под сломанным туннелем перестанет реагировать настолько, что
+  # даже внутренний таймаут curl не сработает, весь процесс всё равно будет
+  # принудительно снят снаружи, не утянув за собой цикл сторожа.
+  if [ "$CURL" = "$TCURL" ]; then LD_LIBRARY_PATH=$LIB timeout 10 "$CURL" "$@"; else timeout 10 "$CURL" "$@"; fi
 }
 
 # ---------- состояние VPN (один вызов dumpsys за проверку) ----------
@@ -109,7 +123,7 @@ find_tile() {
   if [ "$pkg" = "$CF_PKG" ]; then echo "$CF_TILE"; return 0; fi
   CF="/data/adb/warp_tile_cache_$(echo "$pkg" | tr -c 'A-Za-z0-9' '_')"
   if [ -s "$CF" ]; then cat "$CF"; return 0; fi
-  T=$(dumpsys package "$pkg" 2>/dev/null | grep -B2 'action.QS_TILE' | grep -oE "$pkg/[A-Za-z0-9_.\$]+" | head -1)
+  T=$(timeout 5 dumpsys package "$pkg" 2>/dev/null | grep -B2 'action.QS_TILE' | grep -oE "$pkg/[A-Za-z0-9_.\$]+" | head -1)
   if [ -n "$T" ]; then echo "$T" > "$CF"; echo "$T"; return 0; fi
   return 1
 }
@@ -119,16 +133,16 @@ find_tile() {
 tile_click() {
   [ "$ALLOW_TILE_UI" = 0 ] && { log "Плитка отключена (ALLOW_TILE_UI=0), пропускаю нажатие"; return 1; }
   log "Резерв: разворачиваю шторку и жму плитку (тихое восстановление не сработало)"
-  DPY=$(dumpsys power 2>/dev/null | grep -m1 'mWakefulness=' | grep -o 'Awake\|Asleep\|Dozing')
+  DPY=$(timeout 5 dumpsys power 2>/dev/null | grep -m1 'mWakefulness=' | grep -o 'Awake\|Asleep\|Dozing')
   if [ "$DPY" != "Awake" ]; then
-    input keyevent 224 </dev/null >/dev/null 2>&1
+    timeout 5 input keyevent 224 </dev/null >/dev/null 2>&1
     sleep 1
   fi
-  cmd statusbar expand-settings </dev/null >/dev/null 2>&1
+  timeout 5 cmd statusbar expand-settings </dev/null >/dev/null 2>&1
   sleep 1
-  cmd statusbar click-tile "$1" </dev/null >/dev/null 2>&1
+  timeout 5 cmd statusbar click-tile "$1" </dev/null >/dev/null 2>&1
   sleep 1
-  cmd statusbar collapse </dev/null >/dev/null 2>&1
+  timeout 5 cmd statusbar collapse </dev/null >/dev/null 2>&1
 }
 
 # Считает force-stop как "перезапуск WARP" и не даёт превысить лимит за окно —
@@ -146,10 +160,10 @@ restart_budget_use() { VPN_RESTART_TIMES="$VPN_RESTART_TIMES $(date +%s)"; }
 # тоннель после force-stop/смены сети, без единого нажатия по плитке.
 ensure_always_on() {
   [ "$ALLOW_ALWAYS_ON" = 0 ] && return 0
-  CUR=$(settings get secure always_on_vpn_app 2>/dev/null)
+  CUR=$(timeout 5 settings get secure always_on_vpn_app 2>/dev/null)
   if [ "$CUR" != "$1" ]; then
-    settings put secure always_on_vpn_app "$1" >/dev/null 2>&1
-    settings put secure always_on_vpn_lockdown 0 >/dev/null 2>&1
+    timeout 5 settings put secure always_on_vpn_app "$1" >/dev/null 2>&1
+    timeout 5 settings put secure always_on_vpn_lockdown 0 >/dev/null 2>&1
     log "Always-on VPN выставлен на $1"
   fi
 }
@@ -174,8 +188,8 @@ tcp_ok() {
 
 phys() {
   for i in $(ls /sys/class/net 2>/dev/null | grep -E '^(rmnet_data[0-9]|wlan0)$'); do
-    ping -I $i -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 && return 0
-    ping -I $i -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 && return 0
+    timeout 5 ping -I $i -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 && return 0
+    timeout 5 ping -I $i -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 && return 0
     tcp_ok "$i" && return 0
   done
   return 1
@@ -196,7 +210,7 @@ iface_sig() {
   done
 }
 
-in_call() { dumpsys telephony.registry 2>/dev/null | grep -qE 'mCallState=[12]'; }
+in_call() { timeout 5 dumpsys telephony.registry 2>/dev/null | grep -qE 'mCallState=[12]'; }
 
 # IP напрямую через туннель (без DNS)
 p_ip() {
@@ -234,8 +248,24 @@ WARP_STATE="-"  # on|off|unknown(таймаут)|-(не WARP)
 
 check() {
   I=off; C=off; G="-"; T_CF="-"
-  p_ip && I=on
+  # p_ip запускаем в фоне параллельно с p_cf/p_g, а не последовательно — иначе при
+  # настоящем обрыве связи (когда все три проверки гарантированно таймаутят) один
+  # цикл проверки может занимать до 18 сек вместо 6, и всё, что завязано на частые
+  # повторные проверки (например, перепривязка после смены сети), на деле крутится
+  # в 2-3 раза реже, чем задумано в коде.
+  IPF=/data/adb/.wd_ipcheck_$$
+  ( p_ip && echo 1 > "$IPF" || echo 0 > "$IPF" ) &
+  IPPID=$!
   if p_cf; then C=on; else G=off; p_g && G=on; fi
+  # Голый wait не имеет собственного тайм-аута — если фоновый curl внутри p_ip
+  # зависнет глубже своего же -m 6 (например, сетевой стек под сломанным туннелем
+  # перестал реагировать даже на сигналы завершения), wait ждал бы бесконечно и
+  # утянул бы за собой весь цикл целиком. Ограничиваем ожидание жёстким потолком.
+  WN=0
+  while kill -0 "$IPPID" 2>/dev/null && [ $WN -lt 10 ]; do sleep 1; WN=$((WN+1)); done
+  kill -9 "$IPPID" 2>/dev/null
+  [ "$(cat "$IPF" 2>/dev/null)" = 1 ] && I=on
+  rm -f "$IPF"
 }
 
 settle() {  # $1 макс. секунд; успех = 3 удачные проверки подряд
@@ -263,7 +293,7 @@ write_diag() {
     fi
     echo "физическая сеть: $(phys && echo ok || echo fail)"
     echo "интерфейсы: $(iface_sig)"
-    echo "private_dns: $(settings get global private_dns_mode 2>/dev/null) / $(settings get global private_dns_specifier 2>/dev/null)"
+    echo "private_dns: $(timeout 5 settings get global private_dns_mode 2>/dev/null) / $(timeout 5 settings get global private_dns_specifier 2>/dev/null)"
     echo "VPN: $(timeout 5 dumpsys connectivity 2>/dev/null | grep -F 'ni{VPN ' | cut -c1-260)"
     echo "DNS по сетям:"
     timeout 5 dumpsys connectivity 2>/dev/null | grep -F 'NetworkAgentInfo{' | sed -n 's/.*ni{\([A-Z]*\).*DnsAddresses: \[\([^]]*\)\].*/  \1 dns=\2/p' | head -6
@@ -312,7 +342,7 @@ vpn_hard_restart() {  # $1 пакет: force-stop убивает тоннель;
   fi
   restart_budget_use
   ensure_always_on "$1"
-  am force-stop "$1" >/dev/null 2>&1
+  timeout 8 am force-stop "$1" >/dev/null 2>&1
   if ! wait_for down 20; then
     refresh_vpn
     if [ "$V" = up ]; then log "После force-stop VPN уже поднят системой"; return 0; fi
@@ -329,7 +359,7 @@ vpn_hard_restart() {  # $1 пакет: force-stop убивает тоннель;
   refresh_vpn; ST2=$V
   if [ "$ST1" = down ] && [ "$ST2" = down ]; then
     log "VPN всё ещё выключен через 45 сек. Повтор: снова force-stop + плитка (не голый повторный клик — так гарантированно ON, а не переключение туда-обратно)"
-    am force-stop "$1" >/dev/null 2>&1
+    timeout 8 am force-stop "$1" >/dev/null 2>&1
     wait_for down 15
     tile_click "$T"
     wait_for up 45 && return 0
@@ -344,14 +374,14 @@ vpn_hard_restart() {  # $1 пакет: force-stop убивает тоннель;
 # ---------- лестница ступеней ----------
 step_dns() {
   log "Ступень 1: сброс DNS-кэша и Private DNS"
-  ndc resolver flushdefaultif >/dev/null 2>&1
+  timeout 5 ndc resolver flushdefaultif >/dev/null 2>&1
   if [ "$ALLOW_DNS_BOUNCE" = 1 ]; then
-    PM=$(settings get global private_dns_mode 2>/dev/null)
+    PM=$(timeout 5 settings get global private_dns_mode 2>/dev/null)
     if [ -z "$PM" ] || [ "$PM" = null ]; then PM=opportunistic; fi
     echo "$PM" > "$PDNS_BAK"
-    settings put global private_dns_mode off >/dev/null 2>&1
+    timeout 5 settings put global private_dns_mode off >/dev/null 2>&1
     sleep 3
-    settings put global private_dns_mode "$PM" >/dev/null 2>&1
+    timeout 5 settings put global private_dns_mode "$PM" >/dev/null 2>&1
     rm -f "$PDNS_BAK"
   fi
   # Если отдельно стоит модуль CF DNS-прокси (подменяет зависающий встроенный резолвер
@@ -381,9 +411,9 @@ step_vpn() {
 step_net() {
   log "Ступень 3: перезапуск сети"
   if [ "$(cat /sys/class/net/wlan0/operstate 2>/dev/null)" = up ]; then
-    svc wifi disable >/dev/null 2>&1; sleep 4; svc wifi enable >/dev/null 2>&1
+    timeout 5 svc wifi disable >/dev/null 2>&1; sleep 4; timeout 5 svc wifi enable >/dev/null 2>&1
   else
-    svc data disable >/dev/null 2>&1; sleep 4; svc data enable >/dev/null 2>&1
+    timeout 5 svc data disable >/dev/null 2>&1; sleep 4; timeout 5 svc data enable >/dev/null 2>&1
   fi
   sleep 8
   wait_net 45 || log "Физическая сеть не вернулась за 45 сек"
@@ -394,9 +424,9 @@ step_net() {
 air_set() {  # $1 enable|disable
   if [ "$1" = enable ]; then AV=1; AS=true; else AV=0; AS=false; fi
   cmd connectivity airplane-mode "$1" >/dev/null 2>&1
-  if [ "$(settings get global airplane_mode_on 2>/dev/null)" != "$AV" ]; then
-    settings put global airplane_mode_on $AV >/dev/null 2>&1
-    am broadcast -a android.intent.action.AIRPLANE_MODE --ez state $AS >/dev/null 2>&1
+  if [ "$(timeout 5 settings get global airplane_mode_on 2>/dev/null)" != "$AV" ]; then
+    timeout 5 settings put global airplane_mode_on $AV >/dev/null 2>&1
+    timeout 5 am broadcast -a android.intent.action.AIRPLANE_MODE --ez state $AS >/dev/null 2>&1
   fi
 }
 
@@ -405,7 +435,7 @@ step_air() {
   touch "$AIR_MARK"
   air_set enable; sleep 6
   air_set disable; sleep 3
-  if [ "$(settings get global airplane_mode_on 2>/dev/null)" = 0 ]; then rm -f "$AIR_MARK"; fi
+  if [ "$(timeout 5 settings get global airplane_mode_on 2>/dev/null)" = 0 ]; then rm -f "$AIR_MARK"; fi
   sleep 10
   wait_net 60 || log "Физическая сеть не вернулась за 60 сек"
   sleep 5
@@ -531,7 +561,7 @@ case "$1" in
     MYVER=$(grep '^version=' "${0%/*}/module.prop" 2>/dev/null | cut -d= -f2)
     [ -z "$MYVER" ] && MYVER=$(grep '^version=' /data/adb/modules/warp_watchdog/module.prop 2>/dev/null | cut -d= -f2)
     echo "сторож: $PS, версия ${MYVER:-?}"
-    echo "vpn=$V pkg=$CURPKG управляемый=$(managed_pkg) always_on=$(settings get secure always_on_vpn_app 2>/dev/null)"
+    echo "vpn=$V pkg=$CURPKG управляемый=$(managed_pkg) always_on=$(timeout 5 settings get secure always_on_vpn_app 2>/dev/null)"
     echo "ip=$I cf=$C warp=$WARP_STATE g=$G"
     echo "лог: $(tail -n 5 "$LOG" 2>/dev/null)"
     exit 0;;
@@ -555,13 +585,13 @@ echo $$ > "$PIDF"
 dumpsys deviceidle whitelist +$CF_PKG >/dev/null 2>&1
 [ -n "$FALLBACK_PKG" ] && dumpsys deviceidle whitelist +$FALLBACK_PKG >/dev/null 2>&1
 # безопасность: вернуть настройки, если прошлый запуск оборвался посреди ступени
-if [ -f "$PDNS_BAK" ]; then settings put global private_dns_mode "$(cat "$PDNS_BAK")" >/dev/null 2>&1; rm -f "$PDNS_BAK"; fi
+if [ -f "$PDNS_BAK" ]; then timeout 5 settings put global private_dns_mode "$(cat "$PDNS_BAK")" >/dev/null 2>&1; rm -f "$PDNS_BAK"; fi
 if [ -f "$AIR_MARK" ]; then air_set disable; rm -f "$AIR_MARK"; fi
 
 MYVER=$(grep '^version=' "${0%/*}/module.prop" 2>/dev/null | cut -d= -f2)
 [ -z "$MYVER" ] && MYVER=$(grep '^version=' /data/adb/modules/warp_watchdog/module.prop 2>/dev/null | cut -d= -f2)
 log "===== Сторож VPN ${MYVER:-(версия неизвестна)} запущен, проверка: ${CURL:-ping} ====="
-log "Private DNS: $(settings get global private_dns_mode 2>/dev/null) / $(settings get global private_dns_specifier 2>/dev/null)"
+log "Private DNS: $(timeout 5 settings get global private_dns_mode 2>/dev/null) / $(timeout 5 settings get global private_dns_specifier 2>/dev/null)"
 while [ "$(getprop sys.boot_completed)" != 1 ]; do sleep 5; done
 # Настоящее время загрузки устройства, не время запуска ЭТОГО процесса — если сторож
 # перезапускается сам (неважно, из-за чего), это не должно выглядеть как новая
@@ -580,6 +610,19 @@ EARLY_MODE=1
 
 while true; do
   N=$(date +%s)
+  if is_bfu; then
+    if [ "$BFU_LOGGED" != 1 ]; then
+      log "Телефон ещё не разблокирован после загрузки — WARP не может подключиться физически (шифрование), жду молча, лестницу не трогаю"
+      BFU_LOGGED=1
+    fi
+    sleep 5
+    continue
+  fi
+  if [ "$BFU_LOGGED" = 1 ]; then
+    log "Телефон разблокирован — проверяю WARP с чистого листа"
+    BFU_LOGGED=0
+    COOL=300; COOL_UNTIL=0
+  fi
   [ $((N-SUMMARY_TS)) -ge 86400 ] && { log "СВОДКА за сутки: сбоев проверки=$FLICK, восстановлений=$RECOV_TOTAL, успешно=$RECOV_OK"; FLICK=0; RECOV_TOTAL=0; RECOV_OK=0; SUMMARY_TS=$N; }
   # Дешёвый "пульс" раз в ~20 минут — если процесс в следующий раз умрёт молча, будет видно
   # последнюю минуту, когда он точно был жив, а не только сам факт тишины между двумя сбоями.
@@ -600,9 +643,22 @@ while true; do
       # то же новое значение держится уже 2-ю проверку подряд — это реальная смена сети
       log "Смена сети: [${LAST_IFACE_SIG:-нет}] -> [${IFACE_SIG:-нет}], Wi-Fi ${LAST_WIFI_ID:--} -> ${WIFI_ID:--}. Ускоренная проверка 3 мин"
       NETSW_UNTIL=$((N+180))
-      if [ "$PROACTIVE_REBIND" = 1 ]; then
+      # Считаем недавние смены сети — если их накопилось 3+ за последние 5 минут,
+      # это не обычное разовое переключение, а нестабильный физический сигнал
+      # (например, слабый Wi-Fi, телефон мечется между ним и мобильным). В этом
+      # случае активная перепривязка на каждое отдельное дрожание только зря крутит
+      # карусель перезапусков — спокойнее положиться на обычную лестницу с её
+      # нарастающей паузой, которая и так подхватит реальный сбой, если он останется.
+      NSW=""
+      for t in $NETSW_TIMES; do [ $((N-t)) -lt 300 ] && NSW="$NSW $t"; done
+      NSW="$NSW $N"; NETSW_TIMES=$NSW
+      NSWC=$(echo $NETSW_TIMES | wc -w)
+      if [ "$PROACTIVE_REBIND" = 1 ] && [ $NSWC -lt 3 ]; then
         if [ -n "$WIFI_ID" ] && [ -z "$LAST_WIFI_ID" ]; then D=$REBIND_DELAY_WIFI_SEC; else D=$REBIND_DELAY_SEC; fi
         REBIND_AT=$((N+D)); REBIND_TRIES=0
+      elif [ $NSWC -ge 3 ]; then
+        log "Сеть нестабильна ($NSWC смен за 5 мин) — пропускаю активную перепривязку, жду обычную лестницу"
+        REBIND_AT=0
       fi
       LAST_IFACE_SIG=$IFACE_SIG; LAST_WIFI_ID=$WIFI_ID
     elif [ "$IFACE_SIG" != "$PEND_SIG" ] || [ "$WIFI_ID" != "$PEND_WIFI" ]; then
@@ -720,6 +776,17 @@ while true; do
         wl_off
         HIST="00000000"; FAILSEQ=0; LAST_LOG_KEY=""
         refresh_vpn; LAST_WIFI_ID=$WIFI_ID; LAST_IFACE_SIG=$(iface_sig)
+      else
+        # Ни одно условие не подошло (например, идёт звонок, или недавно уже была
+        # перепривязка) — раньше тут молча обнулялся таймер без единой строки в лог,
+        # и механизм мог замолчать на неопределённое время без всякого следа. Теперь
+        # честно пишем причину и переназначаем короткую повторную проверку.
+        if in_call; then
+          log "После смены сети WARP не в порядке, но идёт звонок — отложено"
+        else
+          log "После смены сети WARP не в порядке, но перепривязка была недавно — отложено"
+        fi
+        REBIND_AT=$((N+20))
       fi
     else
       REBIND_TRIES=$((REBIND_TRIES+1))
