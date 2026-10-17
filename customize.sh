@@ -1,4 +1,5 @@
-ui_print "- Сторож VPN v4 (WARP Watchdog)"
+ui_print "- Сторож VPN v5.2 (WARP Watchdog)"
+rm -f /data/adb/warp_s1_state 2>/dev/null   # новая установка = чистый счётчик ступени 1
 rm -f /data/adb/service.d/warp_watchdog.sh /data/adb/service.d/warp_observer.sh
 rm -f /data/adb/service.d/warp_watchdog.sh.off /data/adb/service.d/warp_observer.sh.off
 
@@ -30,6 +31,16 @@ MAX_VPN_RESTARTS=3
 VPN_RESTART_WINDOW=600
 # Жёсткий потолок на всю лестницу восстановления, сек
 MAX_RECOVERY_TIME=240
+# v5: если ступень 1 (сброс DNS) не помогла столько раз подряд — начинать сразу со ступени 2
+S1_SKIP_AFTER=2
+# v5: но каждый N-й такой сбой всё равно пробовать ступень 1 (вдруг снова помогает)
+S1_RETRY_EVERY=3
+# v5: 1 = VPN выключен при живой сети — реагировать за ~10 с, а не за 30-60 с
+FAST_DOWN=1
+# v5.1: перед плиткой запускать VPN-сервис напрямую (без шторки). 0 = выключить
+DIRECT_START=1
+DIRECT_AFTER_SEC=7
+DIRECT_WAIT_SEC=20
 CONFEOF
   ui_print "- Создан /data/adb/warp_watchdog.conf"
 else
@@ -45,6 +56,7 @@ else
   heal_if REBIND_DELAY_SEC 8 40
   heal_if REBIND_DELAY_WIFI_SEC 10 55
   heal_if INTERVAL 10 30
+  heal_if DIRECT_AFTER_SEC 12 7   # v5.2: Always-on, когда срабатывает, поднимает VPN за 4-5 с; 12 с ждать незачем
 
   # Дальше — дописываем только отсутствующие ключи безопасными значениями.
   # Ничего, кроме починенного выше, поверх вашего файла не перезаписываем.
@@ -57,11 +69,27 @@ else
   add MAX_VPN_RESTARTS 'MAX_VPN_RESTARTS=3'
   add VPN_RESTART_WINDOW 'VPN_RESTART_WINDOW=600'
   add MAX_RECOVERY_TIME 'MAX_RECOVERY_TIME=240'
+  add S1_SKIP_AFTER 'S1_SKIP_AFTER=2'
+  add S1_RETRY_EVERY 'S1_RETRY_EVERY=3'
+  add FAST_DOWN 'FAST_DOWN=1'
+  add DIRECT_START 'DIRECT_START=1'
+  add DIRECT_AFTER_SEC 'DIRECT_AFTER_SEC=7'
+  add DIRECT_WAIT_SEC 'DIRECT_WAIT_SEC=20'
   ui_print "- Настройки дополнены новыми параметрами (старые сохранены)"
   ui_print "- ВНИМАНИЕ: ALLOW_NET_BOUNCE и ALLOW_AIRPLANE в вашем файле НЕ менялись —"
   ui_print "  если хотите новые безопасные дефолты (выкл.), поправьте их в конфиге вручную."
 fi
 
+# Предупреждения о значениях, которые вредят (сами ничего не меняем — вдруг это осознанный выбор)
+if [ -f "$CONF" ]; then
+  grep -q '^ALLOW_TILE_UI=0' "$CONF" && ui_print "! ALLOW_TILE_UI=0: без плитки сторож не сможет включить VPN, если Always-on не сработал. Рекомендую 1."
+  grep -q '^ALLOW_NET_BOUNCE=1' "$CONF" && ui_print "! ALLOW_NET_BOUNCE=1: сторож будет выключать Wi-Fi/данные. Для DNS-сбоев не нужно. Рекомендую 0."
+fi
+ui_print "- v5: ступень 1 пропускается, если не помогала 2 раза подряд (раз в 3 сбоя — контрольная)"
+ui_print "- v5.2: счётчик «ступень 1 не помогает» переживает перезагрузки; Always-on ждём 7 с, а не 12"
+ui_print "- v5.1: прямой запуск VPN-сервиса вместо шторки/плитки (плитка — только резерв)"
+ui_print "- v5: быстрая реакция (~10 с) на выключенный VPN при живой сети"
+ui_print "- v5: расширенная диагностика сбоев (dnsresolver, tun, прямой DNS) и статистика ступеней в сутках"
 ui_print "- Лестница восстановления: от лёгких мер к тяжёлым, с паузами между попытками"
 ui_print "- Отдельно отличает 'WARP выключен' от 'WARP включён, но не проксирует'"
 ui_print "- Перепривязка после смены сети чинит, только если WARP реально сломан"

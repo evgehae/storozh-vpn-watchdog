@@ -11,6 +11,7 @@ LOG=$DATA/warp_observer.log
 DIAG=$DATA/warp_diag.log
 PAUSE=$DATA/warp_pause
 STATE_LASTPKG=$DATA/warp_last_vpn_pkg
+STATE_S1=$DATA/warp_s1_state
 CONF=$DATA/warp_watchdog.conf
 PIDF=$DATA/warp_watchdog.pid
 PDNS_BAK=$DATA/warp_pdns_orig
@@ -29,6 +30,7 @@ is_bfu() {
   [ -z "$(ls -A "/data/user/0/$CF_PKG/shared_prefs" 2>/dev/null)" ]
 }
 CF_TILE=$CF_PKG/com.cloudflare.app.domain.quicksettingstile.QuickSettingsTileService
+CF_SVC=$CF_PKG/com.cloudflare.app.vpnservice.CloudflareVpnService
 case $0 in */*) MODDIR=${0%/*};; *) MODDIR=.;; esac
 MODPROP=$MODDIR/module.prop
 
@@ -52,6 +54,12 @@ FAST_INTERVAL=3          # быстрый цикл после смены сет�
 MAX_VPN_RESTARTS=3      # не больше стольки принудительных перезапусков WARP за окно ниже
 VPN_RESTART_WINDOW=600  # окно в секундах для лимита выше (10 мин)
 MAX_RECOVERY_TIME=240  # жёсткий потолок на всю лестницу восстановления, сек — дальше принудительно прервать
+S1_SKIP_AFTER=2         # v5: после стольких подряд неудач ступени 1 начинать сразу со ступени 2
+S1_RETRY_EVERY=3        # v5: но каждый N-й такой сбой всё равно пробовать ступень 1 (вдруг снова помогает)
+FAST_DOWN=1             # v5: VPN выключен при живой сети — проверять часто (~3 с), а не раз в INTERVAL
+DIRECT_START=1          # v5.1: перед плиткой пробовать прямой запуск VPN-сервиса (am start-foreground-service) — без шторки
+DIRECT_AFTER_SEC=7      # v5.1/v5.2: сколько ждать, что Always-on поднимет VPN сам, прежде чем запускать сервис напрямую
+DIRECT_WAIT_SEC=20      # v5.1: сколько ждать подъёма VPN после прямого запуска сервиса
 [ -f "$CONF" ] && . "$CONF"
 
 # --- состояние ---
@@ -68,11 +76,21 @@ PHYS_FAILN=0           # подряд неудачных phys() — сбрасы
 FB_SINCE=0; FORCE=0; LAST_DIAG_TS=0
 FLICK=0; RECOV_TOTAL=0; RECOV_OK=0; SUMMARY_TS=$(date +%s); HEARTBEAT_TS=$SUMMARY_TS; ALWAYSON_TS=$SUMMARY_TS; BFU_LOGGED=0
 FOREIGN_LOGGED=""
+# v5.2: счётчик неудач ступени 1 переживает перезагрузки (раньше после ребута сторож "забывал" и зря пробовал ступень 1)
+save_s1() { echo "$S1_FAILS $S1_SKIPPED" > "$STATE_S1" 2>/dev/null; }
+S1_FAILS=0; S1_SKIPPED=0
+if [ -f "$STATE_S1" ]; then
+  read A B < "$STATE_S1" 2>/dev/null
+  case "$A" in ''|*[!0-9]*) A=0;; esac
+  case "$B" in ''|*[!0-9]*) B=0;; esac
+  S1_FAILS=$A; S1_SKIPPED=$B
+fi
+DIR_OK=0; DIR_NO=0; ST1_OK=0; ST1_NO=0; ST1_SKIPS=0; ST2_OK=0; ST2_NO=0; REC_SECS=0
 
 log() {
   echo "$(date '+%F %T') | $*" >> $LOG
-  if [ $(( $(wc -c < $LOG) + 0 )) -gt 80000 ]; then
-    tail -n 400 $LOG > $LOG.t; mv $LOG.t $LOG
+  if [ $(( $(wc -c < $LOG) + 0 )) -gt 160000 ]; then
+    tail -n 1200 $LOG > $LOG.t; mv $LOG.t $LOG
   fi
 }
 
@@ -126,6 +144,36 @@ find_tile() {
   T=$(timeout 5 dumpsys package "$pkg" 2>/dev/null | grep -B2 'action.QS_TILE' | grep -oE "$pkg/[A-Za-z0-9_.\$]+" | head -1)
   if [ -n "$T" ]; then echo "$T" > "$CF"; echo "$T"; return 0; fi
   return 1
+}
+
+# v5.1: имя VPN-сервиса приложения (для WARP известно, для остальных ищем в dumpsys и кэшируем)
+find_vpn_service() {
+  pkg=$1
+  [ -z "$pkg" ] && return 1
+  if [ "$pkg" = "$CF_PKG" ]; then echo "$CF_SVC"; return 0; fi
+  SC="/data/adb/warp_svc_cache_$(echo "$pkg" | tr -c 'A-Za-z0-9' '_')"
+  if [ -s "$SC" ]; then cat "$SC"; return 0; fi
+  T=$(timeout 5 dumpsys package "$pkg" 2>/dev/null | grep -A1 'android.net.VpnService:' | grep -oE "$pkg/[A-Za-z0-9_.\$]+" | head -1)
+  if [ -n "$T" ]; then echo "$T" > "$SC"; echo "$T"; return 0; fi
+  return 1
+}
+
+# v5.1: самая тихая мера после Always-on — запустить VPN-сервис приложения напрямую.
+# Разрешение на VPN у приложения уже выдано, поэтому система просто поднимает тоннель:
+# без шторки, без включения экрана, без нажатий. Проверено вручную на этом телефоне.
+vpn_direct() {  # $1 пакет; 0 = VPN поднялся
+  [ "$DIRECT_START" = 1 ] || return 1
+  SVC=$(find_vpn_service "$1") || return 1
+  OUT=$(timeout 8 am start-foreground-service -n "$SVC" </dev/null 2>&1)
+  if echo "$OUT" | grep -q 'Starting service' && ! echo "$OUT" | grep -qiE 'error|exception|not found'; then
+    if wait_for up "$DIRECT_WAIT_SEC"; then
+      log "$1 поднят прямым запуском сервиса (без шторки)"; DIR_OK=$((DIR_OK+1)); return 0
+    fi
+    log "Прямой запуск сервиса принят, но VPN не поднялся за $DIRECT_WAIT_SEC с"
+  else
+    log "Прямой запуск сервиса не удался: $(echo "$OUT" | head -1 | cut -c1-100)"
+  fi
+  DIR_NO=$((DIR_NO+1)); return 1
 }
 
 # Клик по плитке разворачивает шторку — это заметно и мешает. Используется ТОЛЬКО
@@ -268,10 +316,10 @@ check() {
   rm -f "$IPF"
 }
 
-settle() {  # $1 макс. секунд; успех = 3 удачные проверки подряд
-  t=0; okrow=0; SS0=$(date +%s)
-  while [ $t -lt $1 ] && [ $(( $(date +%s) - SS0 )) -lt $(($1*2)) ]; do
-    sleep 8; t=$((t+8))
+settle() {  # $1 ориентир, сек; успех = 3 удачные проверки подряд (v5: шаг 5 с вместо 8 — подтверждение быстрее)
+  okrow=0; SS0=$(date +%s); LIM=$(( $1*7/4 ))
+  while [ $(( $(date +%s) - SS0 )) -lt $LIM ]; do
+    sleep 5
     refresh_vpn
     if [ "$V" = up ] && p_cf; then
       okrow=$((okrow+1))
@@ -287,6 +335,21 @@ write_diag() {
   {
     echo "===== $(date '+%F %T') причина=$1 ====="
     echo "ip=$I cf=$C g=$G время_cf=$T_CF"
+    # v5: дешёвые снимки состояния — берём ПЕРВЫМИ, пока лестница ещё ничего не изменила
+    echo "--- dnsresolver (статистика по серверам: успехи/таймауты/ошибки) ---"
+    timeout 5 dumpsys dnsresolver 2>/dev/null | grep -iE 'netid|server|success|timeout|error|rtt|private|validation' | cut -c1-160 | head -40
+    echo "--- туннель: mtu и счётчики (rx/tx байт, потери, ошибки) ---"
+    for t in /sys/class/net/tun*; do
+      [ -d "$t" ] || continue
+      echo "  ${t##*/}: mtu=$(cat $t/mtu 2>/dev/null) rx=$(cat $t/statistics/rx_bytes 2>/dev/null) tx=$(cat $t/statistics/tx_bytes 2>/dev/null) rx_drop=$(cat $t/statistics/rx_dropped 2>/dev/null) tx_drop=$(cat $t/statistics/tx_dropped 2>/dev/null) tx_err=$(cat $t/statistics/tx_errors 2>/dev/null)"
+    done
+    echo "--- серия состояния: HIST=$HIST S1_FAILS=$S1_FAILS WARP_STATE=$WARP_STATE ---"
+    if [ -n "$CURL" ]; then
+      R1=$(cu -4 --dns-servers 192.0.2.3 -s -m 5 -o /dev/null -w 'http=%{http_code}' https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null); RC1=$?
+      echo "прямой DNS 192.0.2.3 (встроенный резолвер WARP): $R1 rc=$RC1 (rc=4 — этот curl не умеет --dns-servers)"
+      R2=$(cu -4 --dns-servers 1.1.1.1 -s -m 5 -o /dev/null -w 'http=%{http_code}' https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null); RC2=$?
+      echo "прямой DNS 1.1.1.1 через туннель: $R2 rc=$RC2"
+    fi
     if [ -n "$CURL" ]; then
       echo "trace(name)=$(cu -4 -s -m 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | tr '\n' ' ')"
       echo "DoH-обход резолвера: $(cu -4 --doh-url https://1.1.1.1/dns-query -s -m 8 -o /dev/null -w '%{http_code}' https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)"
@@ -304,8 +367,8 @@ write_diag() {
     echo "Последние события перед сбоем:"
     tail -n 15 "$LOG" 2>/dev/null
   } >> "$DIAG" 2>&1
-  if [ $(( $(wc -c < "$DIAG" 2>/dev/null) + 0 )) -gt 60000 ]; then
-    tail -n 300 "$DIAG" > "$DIAG.t" && mv "$DIAG.t" "$DIAG"
+  if [ $(( $(wc -c < "$DIAG" 2>/dev/null) + 0 )) -gt 120000 ]; then
+    tail -n 700 "$DIAG" > "$DIAG.t" && mv "$DIAG.t" "$DIAG"
   fi
 }
 
@@ -315,7 +378,9 @@ vpn_enable() {  # $1 пакет: сначала тихое ожидание (Alw
   [ "$V" = up ] && return 0
   ensure_always_on "$1"
   if [ "$V" = wait ]; then wait_for up 40 && return 0; fi
-  if wait_for up "$SILENT_WAIT_SEC"; then log "$1 поднялся сам (Always-on), без плитки"; return 0; fi
+  FIRST_WAIT=$SILENT_WAIT_SEC; [ "$DIRECT_START" = 1 ] && FIRST_WAIT=$DIRECT_AFTER_SEC
+  if wait_for up "$FIRST_WAIT"; then log "$1 поднялся сам (Always-on), без плитки"; return 0; fi
+  vpn_direct "$1" && return 0
   [ "$ALLOW_TILE_UI" = 0 ] && { log "ОШИБКА: $1 не поднялся сам, плитка отключена настройкой"; notify "Сторож VPN" "$1 не поднялся сам, включите вручную (плитка отключена настройкой)."; return 1; }
   T=$(find_tile "$1") || { log "Плитка для $1 не найдена — только уведомление"; notify "Сторож VPN" "$1 отключился, плитка не найдена, включите вручную."; return 1; }
   tile_click "$T"
@@ -347,7 +412,9 @@ vpn_hard_restart() {  # $1 пакет: force-stop убивает тоннель;
     refresh_vpn
     if [ "$V" = up ]; then log "После force-stop VPN уже поднят системой"; return 0; fi
   fi
-  if wait_for up "$SILENT_WAIT_SEC"; then log "$1 поднялся сам после force-stop (Always-on), без плитки"; return 0; fi
+  FIRST_WAIT=$SILENT_WAIT_SEC; [ "$DIRECT_START" = 1 ] && FIRST_WAIT=$DIRECT_AFTER_SEC
+  if wait_for up "$FIRST_WAIT"; then log "$1 поднялся сам после force-stop (Always-on), без плитки"; return 0; fi
+  vpn_direct "$1" && return 0
   [ "$ALLOW_TILE_UI" = 0 ] && { log "Тихое восстановление не сработало, плитка отключена настройкой"; return 1; }
   T=$(find_tile "$1") || { log "Плитка для $1 не найдена — только уведомление"; notify "Сторож VPN" "Сбой сети через $1. Плитка не найдена, включите вручную."; return 1; }
   tile_click "$T"
@@ -361,6 +428,7 @@ vpn_hard_restart() {  # $1 пакет: force-stop убивает тоннель;
     log "VPN всё ещё выключен через 45 сек. Повтор: снова force-stop + плитка (не голый повторный клик — так гарантированно ON, а не переключение туда-обратно)"
     timeout 8 am force-stop "$1" >/dev/null 2>&1
     wait_for down 15
+    vpn_direct "$1" && return 0
     tile_click "$T"
     wait_for up 45 && return 0
   else
@@ -378,11 +446,14 @@ step_dns() {
   if [ "$ALLOW_DNS_BOUNCE" = 1 ]; then
     PM=$(timeout 5 settings get global private_dns_mode 2>/dev/null)
     if [ -z "$PM" ] || [ "$PM" = null ]; then PM=opportunistic; fi
-    echo "$PM" > "$PDNS_BAK"
-    timeout 5 settings put global private_dns_mode off >/dev/null 2>&1
-    sleep 3
-    timeout 5 settings put global private_dns_mode "$PM" >/dev/null 2>&1
-    rm -f "$PDNS_BAK"
+    # v5: если Private DNS и так выключен, "выключить-включить" ничего не меняет — не тратим 3 с впустую
+    if [ "$PM" != off ]; then
+      echo "$PM" > "$PDNS_BAK"
+      timeout 5 settings put global private_dns_mode off >/dev/null 2>&1
+      sleep 3
+      timeout 5 settings put global private_dns_mode "$PM" >/dev/null 2>&1
+      rm -f "$PDNS_BAK"
+    fi
   fi
   # Если отдельно стоит модуль CF DNS-прокси (подменяет зависающий встроенный резолвер
   # WARP) — на этой же ступени перезапускаем и его. Модуля может не быть вовсе, тогда
@@ -404,7 +475,7 @@ step_vpn() {
     return 1
   fi
   TP=$(target_pkg)
-  log "Ступень 2: полный перезапуск $TP (force-stop + плитка)"
+  log "Ступень 2: полный перезапуск $TP (force-stop → Always-on → прямой запуск сервиса → плитка как резерв)"
   vpn_hard_restart "$TP"
 }
 
@@ -494,6 +565,21 @@ recover_inner() {  # $1 hard|flap  $2 dns|tunnel|down
   fi
   if [ $((NR-LAST_OK_TS)) -lt 1200 ] && [ "$LAST_OK_STEP" -gt "$S" ]; then S=$LAST_OK_STEP; [ $S -gt 2 ] && S=2; fi
   [ $S -gt $MAX ] && S=$MAX
+  # v5: адаптивный пропуск ступени 1 — по счётчику подряд неудач, без привязки ко времени.
+  # Если мягкий сброс DNS уже не помог S1_SKIP_AFTER раз подряд, не тратим на него 40-70 с:
+  # идём сразу на перезапуск WARP. Каждый S1_RETRY_EVERY-й сбой пробуем ступень 1 снова.
+  if [ $S -eq 1 ] && [ $S1_FAILS -ge $S1_SKIP_AFTER ]; then
+    S1_SKIPPED=$((S1_SKIPPED+1))
+    if [ $S1_SKIPPED -ge $S1_RETRY_EVERY ]; then
+      S1_SKIPPED=0
+      save_s1
+      log "Ступень 1 не помогала $S1_FAILS раз(а) подряд — пробую её снова (контрольная попытка)"
+    else
+      ST1_SKIPS=$((ST1_SKIPS+1)); save_s1
+      log "Ступень 1 не помогала $S1_FAILS раз(а) подряд — начинаю сразу со ступени 2 (пропуск $S1_SKIPPED из $((S1_RETRY_EVERY-1)))"
+      S=2
+    fi
+  fi
   while [ $S -le $MAX ]; do
     if [ -f "$PAUSE" ]; then log "Пауза включена во время восстановления — останавливаюсь"; return 1; fi
     if [ $(( $(date +%s) - RECOV_START )) -ge $MAX_RECOVERY_TIME ]; then
@@ -505,11 +591,15 @@ recover_inner() {  # $1 hard|flap  $2 dns|tunnel|down
       if settle "$(step_wait $S)"; then
         log "Имена работают после ступени $S ($(( $(date +%s) - T0 )) с)"
         RECOV_OK=$((RECOV_OK+1)); LAST_OK_STEP=$S; LAST_OK_TS=$(date +%s)
+        if [ $S -eq 1 ]; then ST1_OK=$((ST1_OK+1)); S1_FAILS=0; S1_SKIPPED=0; save_s1; fi
+        [ $S -eq 2 ] && ST2_OK=$((ST2_OK+1))
         COOL=300; COOL_UNTIL=$((LAST_OK_TS+120))
         [ $S -ge 2 ] && notify "Сторож VPN" "VPN восстановлен (ступень $S)"
         return 0
       fi
       log "Ступень $S не помогла ($(( $(date +%s) - T0 )) с)"
+      if [ $S -eq 1 ]; then ST1_NO=$((ST1_NO+1)); S1_FAILS=$((S1_FAILS+1)); save_s1; fi
+      [ $S -eq 2 ] && ST2_NO=$((ST2_NO+1))
     fi
     S=$((S+1))
   done
@@ -529,7 +619,8 @@ wl_off() { echo warp_watchdog > /sys/power/wake_unlock 2>/dev/null; }
 # до следующей ручной перезагрузки — это и есть разница между "защитой" и "новой поломкой".
 wl_idle_refresh() { echo "warp_watchdog_idle 45000000000" > /sys/power/wake_lock 2>/dev/null; }
 recover() {
-  wl_on; recover_inner "$@"; RCR=$?; wl_off
+  wl_on; RT0=$(date +%s); recover_inner "$@"; RCR=$?; wl_off
+  REC_SECS=$((REC_SECS + $(date +%s) - RT0))
   refresh_vpn; LAST_WIFI_ID=$WIFI_ID; LAST_IFACE_SIG=$(iface_sig); REBIND_AT=0
   return $RCR
 }
@@ -623,7 +714,7 @@ while true; do
     BFU_LOGGED=0
     COOL=300; COOL_UNTIL=0
   fi
-  [ $((N-SUMMARY_TS)) -ge 86400 ] && { log "СВОДКА за сутки: сбоев проверки=$FLICK, восстановлений=$RECOV_TOTAL, успешно=$RECOV_OK"; FLICK=0; RECOV_TOTAL=0; RECOV_OK=0; SUMMARY_TS=$N; }
+  [ $((N-SUMMARY_TS)) -ge 86400 ] && { log "СВОДКА за сутки: сбоев проверки=$FLICK, восстановлений=$RECOV_TOTAL, успешно=$RECOV_OK | ступень1 ок/нет/пропущена=$ST1_OK/$ST1_NO/$ST1_SKIPS, ступень2 ок/нет=$ST2_OK/$ST2_NO | время в восстановлении=${REC_SECS} с | прямой запуск сервиса ок/нет=$DIR_OK/$DIR_NO"; FLICK=0; DIR_OK=0; DIR_NO=0; RECOV_TOTAL=0; RECOV_OK=0; ST1_OK=0; ST1_NO=0; ST1_SKIPS=0; ST2_OK=0; ST2_NO=0; REC_SECS=0; SUMMARY_TS=$N; }
   # Дешёвый "пульс" раз в ~20 минут — если процесс в следующий раз умрёт молча, будет видно
   # последнюю минуту, когда он точно был жив, а не только сам факт тишины между двумя сбоями.
   [ $((N-HEARTBEAT_TS)) -ge 1200 ] && { log "пульс: сторож жив, аптайм телефона $(( (N-BOOT_START)/60 )) мин"; HEARTBEAT_TS=$N; }
@@ -819,7 +910,11 @@ while true; do
   # иначе телефон опрашивается слишком часто и ловит больше обычных коротких зависаний
   # как "сбои", даже когда реальной проблемы нет.
   NOW_BOOT=$(( $(date +%s) - BOOT_START ))
-  if [ "$RES" != 0 ] || [ $N -lt $NETSW_UNTIL ] || [ "$NOW_BOOT" -lt "$EARLY_BOOT_WINDOW" ]; then
+  # v5: VPN выключен при живой физической сети (DOWNN>0) — тоже быстрый цикл, иначе до
+  # подтверждения сбоя (DOWNN>=2) проходило 30-60 с. Без сети (DOWNN=0) цикл остаётся медленным.
+  FASTDOWN=0
+  [ "$FAST_DOWN" = 1 ] && [ "$V" = down ] && [ $DOWNN -gt 0 ] && [ $P = 0 ] && FASTDOWN=1
+  if [ "$RES" != 0 ] || [ $FASTDOWN = 1 ] || [ $N -lt $NETSW_UNTIL ] || [ "$NOW_BOOT" -lt "$EARLY_BOOT_WINDOW" ]; then
     sleep "$EARLY_INTERVAL"
   else
     EARLY_MODE=0
