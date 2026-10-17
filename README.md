@@ -11,7 +11,7 @@ Magisk-модуль для Android (root): следит за Cloudflare WARP (п
 
 WARP периодически зависает сам по себе: соединение формально есть, а трафик не идёт. Без модуля это выглядело так — сайт не грузится, нужно лезть в шторку, тыкать плитку вручную, иногда не с первого раза, иногда ждать, иногда помогала только полная очистка данных приложения. Сторож следит за этим в фоне и чинит сам, до того как успеешь заметить, что что-то сломалось.
 
-Версия: **v5.2**. См. также [CHANGELOG.md](CHANGELOG.md).
+Версия: **v5.5**. См. также [CHANGELOG.md](CHANGELOG.md).
 
 ## Что модуль делает в двух словах
 
@@ -40,6 +40,16 @@ WARP периодически зависает сам по себе: соеди�
 ## После перезагрузки телефона: ждёт разблокировки
 
 Пока телефон не разблокирован первый раз после перезагрузки, данные приложения WARP физически недоступны никому, включая root (шифрование хранилища) — WARP не может подключиться в принципе, что бы ни делал сторож. Модуль это обнаруживает и **не тратит попытки впустую**: просто тихо ждёт разблокировки, не запуская лестницу и не накапливая паузу между попытками. Как только разблокируете — сразу, без задержки, проверяет WARP с чистого листа.
+
+## Android TV, приставки и кабель Ethernet
+
+Модуль работает и на устройствах без шторки. На Android TV (определяется автоматически, `TV_MODE=auto`) плитка, шторка и режим полёта отключаются, а VPN поднимается только тихо: Always-on VPN и прямой запуск VPN-сервиса. Физической сетью считаются Wi-Fi (`wlan0`), кабель Ethernet (`eth*`) и мобильная сеть (`rmnet_data*`, `ccmni*`).
+
+Что нужно для работы на ТВ:
+1. Root и Magisk, установленный модуль, перезагрузка.
+2. Приложение **1.1.1.1 (WARP)** с уже настроенным подключением (модуль только следит за VPN, но не создаёт его).
+3. `curl` (из Termux или системный). Без него проверки идут через `ping`: модуль работает, но без точного определения `warp=on/off`.
+4. Проверить окружение один раз: `su -c 'sh /data/adb/modules/warp_watchdog/watchdog.sh tvcheck'`.
 
 ## Лестница восстановления
 
@@ -102,6 +112,7 @@ WARP периодически зависает сам по себе: соеди�
 su -c 'sh /data/adb/modules/warp_watchdog/watchdog.sh status'
 su -c 'sh /data/adb/modules/warp_watchdog/watchdog.sh check'
 su -c 'sh /data/adb/modules/warp_watchdog/watchdog.sh diag'
+su -c 'sh /data/adb/modules/warp_watchdog/watchdog.sh tvcheck'
 su -c 'tail -n 60 /data/adb/warp_observer.log'
 su -c 'tail -n 40 /data/adb/warp_diag.log'
 ```
@@ -110,7 +121,7 @@ su -c 'tail -n 40 /data/adb/warp_diag.log'
 
 ## Конфиг: `/data/adb/warp_watchdog.conf`
 
-Правится вручную, **требует перезагрузки** после изменения. Основные параметры: `ALLOW_DNS_BOUNCE`, `ALLOW_NET_BOUNCE`, `ALLOW_AIRPLANE`, `SILENT_WAIT_SEC`, `INTERVAL`, `MAX_VPN_RESTARTS`, `MAX_RECOVERY_TIME`, `FALLBACK_PKG`, а также `S1_SKIP_AFTER`, `S1_RETRY_EVERY`, `FAST_DOWN`, `DIRECT_START`, `DIRECT_AFTER_SEC`, `DIRECT_WAIT_SEC`.
+Правится вручную, **требует перезагрузки** после изменения. Основные параметры: `ALLOW_DNS_BOUNCE`, `ALLOW_NET_BOUNCE`, `ALLOW_AIRPLANE`, `SILENT_WAIT_SEC`, `INTERVAL`, `MAX_VPN_RESTARTS`, `MAX_RECOVERY_TIME`, `FALLBACK_PKG`, а также `S1_SKIP_AFTER`, `S1_RETRY_EVERY`, `FAST_DOWN`, `DIRECT_START`, `DIRECT_AFTER_SEC`, `DIRECT_WAIT_SEC`, `TV_MODE`.
 
 ## Известные ограничения
 
